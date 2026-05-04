@@ -1,0 +1,6 @@
+{
+  "name": "Choice Board",
+  "description": "A simplified digital choice-board for therapists to create sequential, linked prompts for minimally verbal or non-verbal clients.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
