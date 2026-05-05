@@ -14,7 +14,8 @@ import {
   ArrowRight, 
   RotateCcw,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  Settings
 } from 'lucide-react';
 
 // --- Types ---
@@ -31,9 +32,32 @@ enum AppMode {
   CREATE = 'CREATE',
   CHOICE = 'CHOICE',
   HISTORY = 'HISTORY',
+  SETTINGS = 'SETTINGS',
+}
+
+interface Timeline {
+  id: string;
+  steps: Step[];
 }
 
 // --- Components ---
+
+/**
+ * Helper to generate ID like 26May05-01
+ */
+const generateTimelineId = (existingTimelines: { id: string }[]) => {
+  const now = new Date();
+  const year = now.getFullYear().toString().slice(-2);
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const month = months[now.getMonth()];
+  const day = now.getDate().toString().padStart(2, '0');
+  const dateStr = `${year}${month}${day}`;
+  
+  const sameDayCount = existingTimelines.filter(t => t.id.startsWith(dateStr)).length;
+  const seq = (sameDayCount + 1).toString().padStart(2, '0');
+  
+  return `${dateStr}-${seq}`;
+};
 
 /**
  * Auto-resizing text component to prevent truncation.
@@ -75,23 +99,42 @@ export default function App() {
   // --- State ---
   const [mode, setMode] = useState<AppMode>(AppMode.CREATE);
   const [activeSession, setActiveSession] = useState<Step[]>([]);
-  const [archivedSessions, setArchivedSessions] = useState<Step[][]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string>("");
+  const [archivedSessions, setArchivedSessions] = useState<Timeline[]>([]);
+  const [clientName, setClientName] = useState("");
   const [currentTitle, setCurrentTitle] = useState("");
   const [currentOptions, setCurrentOptions] = useState<string[]>(["", ""]);
   const [selectedIndices, setSelectedIndices] = useState<number[]>([]);
   const [confirmingBranch, setConfirmingBranch] = useState<{ sIdx: number, stIdx: number } | null>(null);
   const [confirmingReset, setConfirmingReset] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState<number | 'active' | null>(null);
 
   // Initialize from localStorage if available
   useEffect(() => {
     const savedActive = localStorage.getItem('choice-board-active');
     const savedArchived = localStorage.getItem('choice-board-archived');
+    const savedClient = localStorage.getItem('choice-board-client');
+    const savedActiveId = localStorage.getItem('choice-board-active-id');
     
     if (savedActive) {
       try { setActiveSession(JSON.parse(savedActive)); } catch (e) { console.error(e); }
     }
     if (savedArchived) {
-      try { setArchivedSessions(JSON.parse(savedArchived)); } catch (e) { console.error(e); }
+      try { 
+        const parsed = JSON.parse(savedArchived);
+        // Migration check
+        if (parsed.length > 0 && Array.isArray(parsed[0])) {
+          setArchivedSessions(parsed.map((steps: Step[], i: number) => ({ id: `legacy-${i}`, steps })));
+        } else {
+          setArchivedSessions(parsed);
+        }
+      } catch (e) { console.error(e); }
+    }
+    if (savedClient) setClientName(savedClient);
+    if (savedActiveId) {
+      setActiveSessionId(savedActiveId);
+    } else {
+      setActiveSessionId(generateTimelineId([]));
     }
   }, []);
 
@@ -99,7 +142,9 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('choice-board-active', JSON.stringify(activeSession));
     localStorage.setItem('choice-board-archived', JSON.stringify(archivedSessions));
-  }, [activeSession, archivedSessions]);
+    localStorage.setItem('choice-board-client', clientName);
+    localStorage.setItem('choice-board-active-id', activeSessionId);
+  }, [activeSession, archivedSessions, clientName, activeSessionId]);
 
   // --- Handlers ---
 
@@ -157,19 +202,21 @@ export default function App() {
   };
 
   const branchFromStep = (sIdx: number, stIdx: number) => {
-    const targetSession = sIdx === -1 ? activeSession : archivedSessions[sIdx];
-    const step = targetSession[stIdx];
+    const targetSteps = sIdx === -1 ? activeSession : archivedSessions[sIdx].steps;
+    const step = targetSteps[stIdx];
     
-    // 1. Archive current active session if it has steps
+    // Archive current active session if it has steps
     if (activeSession.length > 0) {
-      setArchivedSessions([activeSession, ...archivedSessions]);
+      setArchivedSessions([{ id: activeSessionId, steps: activeSession }, ...archivedSessions]);
     }
 
-    // 2. Clone the prefix of the target session into activeSession
-    const newPrefix = targetSession.slice(0, stIdx);
+    // Generate new ID for the new branch
+    const newId = generateTimelineId([...archivedSessions, { id: activeSessionId }]);
+    setActiveSessionId(newId);
+
+    const newPrefix = targetSteps.slice(0, stIdx);
     setActiveSession(newPrefix);
 
-    // 3. Prefill the 'Create' mode with the branched step's content
     setCurrentTitle(step.title);
     const options = [...step.options];
     while (options.length < 2) options.push("");
@@ -181,14 +228,25 @@ export default function App() {
 
   const handleResetSession = () => {
     if (activeSession.length > 0) {
-      setArchivedSessions([activeSession, ...archivedSessions]);
+      setArchivedSessions([{ id: activeSessionId, steps: activeSession }, ...archivedSessions]);
     }
+    const newId = generateTimelineId([...archivedSessions, { id: activeSessionId }]);
+    setActiveSessionId(newId);
     setActiveSession([]);
     setCurrentTitle("");
     setCurrentOptions(["", ""]);
     setSelectedIndices([]);
     setMode(AppMode.CREATE);
     setConfirmingReset(false);
+  };
+
+  const deleteTimeline = (sIdx: number | 'active') => {
+    if (sIdx === 'active') {
+      setActiveSession([]);
+    } else {
+      setArchivedSessions(archivedSessions.filter((_, i) => i !== sIdx));
+    }
+    setConfirmingDelete(null);
   };
 
   // --- Render Helpers ---
@@ -203,10 +261,17 @@ export default function App() {
     >
       <header className="p-6 border-b border-gray-100 flex justify-between items-center bg-white sticky top-0 z-10">
         <div>
-          <h1 className="text-sm font-bold tracking-widest text-gray-400 uppercase">Create Step {activeSession.length + 1}</h1>
-          <p className="text-xs text-gray-400">Therapist Mode</p>
+          <h1 className="text-sm font-bold tracking-widest text-gray-400 uppercase">Step {activeSession.length + 1}</h1>
+          <p className="text-[10px] text-gray-400 font-mono">{activeSessionId}</p>
         </div>
         <div className="flex gap-2">
+          <button 
+            onClick={() => setMode(AppMode.SETTINGS)}
+            className="p-2 text-gray-400 hover:bg-gray-50 rounded-full transition-colors"
+            title="Settings"
+          >
+            <Settings size={20} />
+          </button>
           {(activeSession.length > 0 || archivedSessions.length > 0) && (
             <button 
               onClick={() => setMode(AppMode.HISTORY)}
@@ -227,20 +292,20 @@ export default function App() {
       </header>
 
       {confirmingReset && (
-        <div className="absolute inset-0 z-50 bg-white/95 flex flex-col items-center justify-center p-8 text-center space-y-6">
+        <div className="absolute inset-0 z-50 bg-white/98 flex flex-col items-center justify-center p-8 text-center space-y-6">
           <div className="w-20 h-20 bg-red-50 text-red-500 rounded-full flex items-center justify-center">
             <RotateCcw size={40} />
           </div>
           <div>
-            <h2 className="text-xl font-bold text-gray-900">Start New Session?</h2>
-            <p className="text-gray-500 mt-2">The current session will be saved to history.</p>
+            <h2 className="text-xl font-bold text-gray-900">Start New Timeline?</h2>
+            <p className="text-gray-500 mt-2">The current timeline ({activeSessionId}) will be saved to history.</p>
           </div>
           <div className="flex flex-col w-full gap-3">
             <button 
               onClick={handleResetSession}
               className="w-full py-4 bg-red-500 text-white rounded-2xl font-bold text-lg shadow-lg shadow-red-200"
             >
-              YES, RESET
+              YES, START NEW
             </button>
             <button 
               onClick={() => setConfirmingReset(false)}
@@ -318,7 +383,7 @@ export default function App() {
           }`}
         >
           <Play size={20} />
-          START CLIENT CHOICE
+          START {clientName ? clientName.toUpperCase() : "CLIENT"} CHOICE
         </button>
       </footer>
     </motion.div>
@@ -341,7 +406,9 @@ export default function App() {
             className="font-bold text-gray-800" 
             maxSize={36} 
           />
-          <div className="mt-2 text-xs font-bold text-blue-500 tracking-widest uppercase">Client View</div>
+          <div className="mt-2 text-[10px] font-black text-blue-500 tracking-[0.2em] uppercase">
+            {clientName || "Client View"}
+          </div>
         </header>
 
         <main className="flex-1 overflow-y-auto px-4 space-y-4 pb-32">
@@ -416,7 +483,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className="flex-1 overflow-y-auto p-6 space-y-12">
+      <main className="flex-1 overflow-y-auto p-6 space-y-12 pb-24">
         {activeSession.length === 0 && archivedSessions.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-gray-300 space-y-4">
             <History size={64} strokeWidth={1} />
@@ -424,30 +491,139 @@ export default function App() {
           </div>
         ) : (
           <div className="space-y-12">
-            {/* Active Session */}
-            {activeSession.length > 0 && (
-              <section className="space-y-4">
-                <div className="flex items-center gap-2 mb-4">
-                  <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                  <h2 className="text-xs font-black uppercase tracking-widest text-green-600">Active Timeline</h2>
+            {/* Active Timeline */}
+            <section className="space-y-4">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <div className={`w-2 h-2 rounded-full ${activeSession.length > 0 ? 'bg-green-500 animate-pulse' : 'bg-gray-300'}`} />
+                  <h2 className="text-xs font-black uppercase tracking-widest text-gray-600">Active: {activeSessionId}</h2>
                 </div>
-                {activeSession.map((step, idx) => renderHistoryStep(step, idx, -1))}
-              </section>
-            )}
+                {activeSession.length > 0 && (
+                  <button 
+                    onClick={() => setConfirmingDelete('active')}
+                    className="p-2 text-gray-300 hover:text-red-500 transition-colors"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                )}
+              </div>
+              {activeSession.length === 0 && <p className="text-xs text-gray-300 italic px-8">No steps in current timeline.</p>}
+              {activeSession.map((step, idx) => renderHistoryStep(step, idx, -1))}
+            </section>
 
             {/* Archived Sessions */}
             {archivedSessions.map((session, sIdx) => (
               <section key={`session-${sIdx}`} className="space-y-4 opacity-70 hover:opacity-100 transition-opacity">
-                <div className="flex items-center gap-2 mb-4">
-                  <div className="w-2 h-2 rounded-full bg-gray-300" />
-                  <h2 className="text-xs font-black uppercase tracking-widest text-gray-400">Past Timeline {archivedSessions.length - sIdx}</h2>
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-gray-300" />
+                    <h2 className="text-xs font-black uppercase tracking-widest text-gray-400">Past: {session.id}</h2>
+                  </div>
+                  <button 
+                    onClick={() => setConfirmingDelete(sIdx)}
+                    className="p-2 text-gray-300 hover:text-red-500 transition-colors"
+                  >
+                    <Trash2 size={16} />
+                  </button>
                 </div>
-                {session.map((step, idx) => renderHistoryStep(step, idx, sIdx))}
+                {session.steps.map((step, idx) => renderHistoryStep(step, idx, sIdx))}
               </section>
             ))}
           </div>
         )}
       </main>
+
+      {/* Delete Confirmation Modal */}
+      <AnimatePresence>
+        {confirmingDelete !== null && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] bg-black/60 flex items-end p-4"
+          >
+            <motion.div 
+              initial={{ y: 100 }}
+              animate={{ y: 0 }}
+              exit={{ y: 100 }}
+              className="w-full bg-white rounded-3xl p-8 space-y-6"
+            >
+              <div className="text-center">
+                <h3 className="text-xl font-bold text-gray-900">Delete Timeline?</h3>
+                <p className="text-gray-500 mt-2">This will permanently remove this timeline and all its steps.</p>
+              </div>
+              <div className="flex flex-col gap-2">
+                <button 
+                  onClick={() => deleteTimeline(confirmingDelete)}
+                  className="w-full py-4 bg-red-500 text-white rounded-2xl font-bold"
+                >
+                  DELETE PERMANENTLY
+                </button>
+                <button 
+                  onClick={() => setConfirmingDelete(null)}
+                  className="w-full py-4 bg-gray-100 text-gray-600 rounded-2xl font-bold"
+                >
+                  CANCEL
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </motion.div>
+  );
+
+  const renderSettingsMode = () => (
+    <motion.div 
+      key="settings"
+      initial={{ opacity: 0, scale: 0.9 }}
+      animate={{ opacity: 1, scale: 1 }}
+      exit={{ opacity: 0, scale: 0.9 }}
+      className="flex flex-col h-full bg-white text-gray-900"
+    >
+      <header className="p-6 border-b border-gray-100 flex items-center bg-white sticky top-0 z-10">
+        <button 
+          onClick={() => setMode(AppMode.CREATE)}
+          className="p-2 mr-2 text-gray-500 hover:bg-gray-50 rounded-full transition-colors"
+        >
+          <ChevronLeft size={24} />
+        </button>
+        <h1 className="text-lg font-bold text-gray-800">Settings</h1>
+      </header>
+
+      <main className="flex-1 p-6 space-y-8">
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <label className="text-xs font-black uppercase tracking-[0.2em] text-gray-400">Client Profile</label>
+            <p className="text-[10px] text-gray-400 leading-normal">
+              Enter the client's name or initials. This will replace "Client View" in the choice mode to make it more personal.
+            </p>
+          </div>
+          <input
+            type="text"
+            value={clientName}
+            onChange={(e) => setClientName(e.target.value)}
+            placeholder="e.g., Alex Johnson"
+            className="w-full p-4 bg-gray-50 border-none rounded-2xl focus:ring-2 focus:ring-blue-100 text-lg font-medium transition-all"
+          />
+        </div>
+
+        <div className="pt-8 border-t border-gray-50 space-y-4">
+          <label className="text-xs font-black uppercase tracking-[0.2em] text-gray-400">About Choice Board</label>
+          <p className="text-xs text-gray-500 leading-relaxed">
+            A minimalist tool for therapists to scaffold conversations and choices. Sessions are saved locally in your browser and are not sent to any server.
+          </p>
+        </div>
+      </main>
+
+      <footer className="p-6">
+        <button 
+          onClick={() => setMode(AppMode.CREATE)}
+          className="w-full py-4 bg-blue-600 text-white rounded-2xl font-bold shadow-lg shadow-blue-100 active:scale-95 transition-all"
+        >
+          SAVE & CONTINUE
+        </button>
+      </footer>
     </motion.div>
   );
 
@@ -513,6 +689,7 @@ export default function App() {
           {mode === AppMode.CREATE && renderCreateMode()}
           {mode === AppMode.CHOICE && renderChoiceMode()}
           {mode === AppMode.HISTORY && renderHistoryMode()}
+          {mode === AppMode.SETTINGS && renderSettingsMode()}
         </AnimatePresence>
       </div>
     </div>
